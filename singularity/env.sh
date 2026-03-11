@@ -1,0 +1,11 @@
+#!/bin/bash
+
+export ROOTSYS=/opt/root
+export PATH=$ROOTSYS/bin:$PATH
+export PYTHONPATH=$ROOTSYS/lib:$PYTHONPATH
+export CLING_STANDARD_PCH=none
+
+export JANA_HOME=/opt/JANA2
+export PATH=$JANA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$JANA_HOME/lib:$LD_LIBRARY_PATH
+export CMAKE_PREFIX_PATH=$JANA_HOME/cmake/lib/JANA:$CMAKE_PREFIX_PATH

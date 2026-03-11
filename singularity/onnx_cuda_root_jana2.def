@@ -1,0 +1,25 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+      
+
+%files
+    singularity/env.sh /opt
+    singularity/scripts/install_onnx.sh /opt/
+    singularity/scripts/install_root.sh /opt/
+    singularity/scripts/install_jana2.sh /opt/
+
+%post
+    # redirect container /tmp 
+    export TMPDIR=/scratch/$USER
+    mkdir -p $TMPDIR
+
+    bash /opt/install_onnx.sh
+    bash /opt/install_root.sh
+    bash /opt/install_jana2.sh
+
+%environment
+    source /opt/env.sh
+
+
+%runscript
+    exec /bin/bash
