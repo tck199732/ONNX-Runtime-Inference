@@ -4,11 +4,16 @@ project(ONNX_Runtime_Examples VERSION 0.0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
 
+
 find_package(JANA REQUIRED)
 find_package(ROOT REQUIRED COMPONENTS Core RIO Tree)
 
 find_path(ONNX_RUNTIME_SESSION_INCLUDE_DIRS onnxruntime_cxx_api.h HINTS /usr/local/include/onnxruntime/)
-
 find_library(ONNX_RUNTIME_LIB onnxruntime HINTS /usr/local/lib)
+
+
+add_library(cnpy thirdparty/cnpy/cnpy.cpp)
+target_include_directories(cnpy PUBLIC thirdparty/cnpy)
+target_link_libraries(cnpy PUBLIC z)
 
 add_subdirectory(src)
