@@ -1,0 +1,36 @@
+#!/bin/sh
+
+#SBATCH --constraint=sciml24
+#SBATCH --nodes 1
+#SBATCH --ntasks 1
+#SBATCH --time=00:30:00
+#SBATCH --partition gpu
+#SBATCH --cpus-per-task 4
+#SBATCH --mem=32G
+#SBATCH --account=hallc
+#SBATCH --gres=gpu:A800:1
+#SBATCH --job-name=inference
+
+# GPU types available on the cluster:
+# TitanRTX      NVIDIA TitanRTX (max 4 per node)
+# T4    NVIDIA T4 (max 16 per node)
+# A100  NVIDIA A100 (max 4 per node)
+# A800  NVIDIA A800 (max 4 per node)
+
+nvidia-smi
+# ./run.sh
+
+IMAGE="./image.sif"
+CMD="./build/src/inference --use_cuda"
+
+singularity exec --nv \
+    --bind $(pwd) \
+    $IMAGE \
+    bash -c "
+    ${CMD}
+    "   
+
+
+
+
+
