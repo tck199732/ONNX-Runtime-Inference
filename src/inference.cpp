@@ -3,10 +3,8 @@
 // https://github.com/microsoft/onnxruntime/blob/v1.8.2/include/onnxruntime/core/session/onnxruntime_cxx_api.h
 #include <onnxruntime_cxx_api.h>
 
-#include <opencv2/dnn/dnn.hpp>
-#include <opencv2/imgcodecs.hpp>
-#include <opencv2/imgproc.hpp>
-
+#include "cnpy.h"
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -117,21 +115,43 @@ std::ostream& operator<<(std::ostream& os,
     return os;
 }
 
-std::vector<std::string> readLabels(std::string& labelFilepath)
+void unpackFeatures(cnpy::NpyArray x, cnpy::NpyArray& x_out,
+                    cnpy::NpyArray& mask_out)
 {
-    std::vector<std::string> labels;
-    std::string line;
-    std::ifstream fp(labelFilepath);
-    while (std::getline(fp, line))
+    auto shape = x.shape;
+    auto ndims = x.shape.size();
+    assert(static_cast<int>(ndims) == 2);
+
+    auto numNodes = shape[0];
+    auto numFeatures = shape[1];
+    auto numPairs = numFeatures / 2;
+
+    x_out = cnpy::NpyArray({numNodes, numPairs, 2}, sizeof(float), false);
+    mask_out = cnpy::NpyArray({numNodes, numPairs}, sizeof(bool), false);
+
+    for (int iNode = 0; iNode < numNodes; ++iNode)
     {
-        labels.push_back(line);
+        for (int iPair = 0; iPair < numPairs; ++iPair)
+        {
+            float energy = x.data<float>()[iNode * numFeatures + 2 * iPair];
+            float time = x.data<float>()[iNode * numFeatures + 2 * iPair + 1];
+            x_out.data<float>()[iNode * numPairs * 2 + iPair * 2] = energy;
+            x_out.data<float>()[iNode * numPairs * 2 + iPair * 2 + 1] = time;
+            mask_out.data<bool>()[iNode * numPairs + iPair] =
+                (std::abs(energy) > 0.0f) || (std::abs(time) > 0.0f);
+        }
     }
-    return labels;
+    return;
 }
+
+void oc_inference(const std::vector<float>& x, const std::vector<float>& beta,
+                  std::vector<int>& object_ids, double beta_thres = 0.4,
+                  double dist_thres = 0.8, int bkg_idx = -1);
 
 int main(int argc, char* argv[])
 {
-    int64_t batchSize = 2;
+    int64_t batchSize = 1; // fixed batch size, 1 event per file
+
     bool useCUDA{true};
     const char* useCUDAFlag = "--use_cuda";
     const char* useCPUFlag = "--use_cpu";
@@ -165,14 +185,52 @@ int main(int argc, char* argv[])
         std::cout << "Inference Execution Provider: CPU" << std::endl;
     }
 
-    std::string instanceName{"image-classification-inference"};
-    std::string modelFilepath{"data/models/squeezenet1.1-7.onnx"};
-    // std::string modelFilepath{"data/models/resnet18-v1-7.onnx"};
-    std::string imageFilepath{
-        "data/images/european-bee-eater-2115564_1920.jpg"};
-    std::string labelFilepath{"data/labels/synset.txt"};
+    std::string instanceName{"object-condensation-inference"};
+    std::string modelFilepath{"./data/models/my_model.onnx"};
+    std::string inputFilepath = "./data/test_data/oc/00000000.npz";
 
-    std::vector<std::string> labels{readLabels(labelFilepath)};
+    /**
+     *  PROCESS DATA TO DESIRED INPUT FORMAT HERE
+     *  - Load npy arrays of a graph sample (1 event)
+     *  - create flatten arrays for onnx input
+     */
+
+    cnpy::npz_t data = cnpy::npz_load(inputFilepath);
+    const auto& node_features_array = data["node_features"];
+    const auto& edge_index_array = data["edge_index"];
+    const auto& edge_attr_array = data["edge_attr"];
+    const auto& node_targets_array = data["node_targets"];
+    const auto& node_positions_array = data["node_positions"];
+
+    cnpy::NpyArray x_npy;
+    cnpy::NpyArray fea_mask_npy;
+    unpackFeatures(node_features_array, x_npy, fea_mask_npy);
+
+    int64_t numNodes = x_npy.shape[0];
+
+    // Input Tensor Values
+    std::vector<float> x = x_npy.as_vec<float>();
+    std::vector<float> pos = node_positions_array.as_vec<float>();
+
+    auto fea_mask = std::make_unique<bool[]>(fea_mask_npy.num_vals);
+    auto node_mask = std::make_unique<bool[]>(numNodes);
+
+    for (int i = 0; i < fea_mask_npy.num_vals; ++i)
+    {
+        fea_mask[i] = fea_mask_npy.data<bool>()[i];
+    }
+    for (int i = 0; i < numNodes; ++i)
+    {
+        node_mask[i] = true;
+    }
+
+    // Output Tensor Values
+    std::vector<float> x_c(pos.size());
+    std::vector<float> beta(numNodes);
+
+    /**
+     * Setting up ONNX environment
+     */
 
     Ort::Env env(OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
                  instanceName.c_str());
@@ -190,9 +248,11 @@ int main(int argc, char* argv[])
     // Available levels are
     // ORT_DISABLE_ALL -> To disable all optimizations
     // ORT_ENABLE_BASIC -> To enable basic optimizations (Such as redundant node
-    // removals) ORT_ENABLE_EXTENDED -> To enable extended optimizations
-    // (Includes level 1 + more complex optimizations like node fusions)
-    // ORT_ENABLE_ALL -> To Enable All possible optimizations
+    // removals) ORT_ENABLE_EXTENDED -> To enable extsize_t inputTensorSize =
+    // vectorProduct(inputDims);ended optimizations (Includes level 1 + more
+    // complex optimizations like node fusions) ORT_ENABLE_ALL -> To Enable All
+    // possible optimizations
+
     sessionOptions.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
@@ -203,154 +263,157 @@ int main(int argc, char* argv[])
     size_t numInputNodes = session.GetInputCount();
     size_t numOutputNodes = session.GetOutputCount();
 
-    Ort::AllocatedStringPtr inputNamePtr = session.GetInputNameAllocated(0, allocator);
-    const char* inputName = inputNamePtr.get();
+    std::vector<std::string> inputNameStrs;
+    std::vector<ONNXTensorElementDataType> inputTypes;
+    std::vector<std::vector<int64_t>> inputDims;
 
-    Ort::TypeInfo inputTypeInfo = session.GetInputTypeInfo(0);
-    auto inputTensorInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
-
-    ONNXTensorElementDataType inputType = inputTensorInfo.GetElementType();
-
-    std::vector<int64_t> inputDims = inputTensorInfo.GetShape();
-    if (inputDims.at(0) == -1)
+    for (int iInput = 0; iInput < numInputNodes; iInput++)
     {
-        std::cout << "Got dynamic batch size. Setting input batch size to "
-                  << batchSize << "." << std::endl;
-        inputDims.at(0) = batchSize;
+        Ort::AllocatedStringPtr inputNamePtr =
+            session.GetInputNameAllocated(iInput, allocator);
+        const char* inputName = inputNamePtr.get();
+        inputNameStrs.push_back(std::string(inputName));
+
+        Ort::TypeInfo inputTypeInfo = session.GetInputTypeInfo(iInput);
+
+        auto inputTensorInfo = inputTypeInfo.GetTensorTypeAndShapeInfo();
+        auto inputType = inputTensorInfo.GetElementType();
+        auto inputShape = inputTensorInfo.GetShape();
+
+        if (inputShape.at(0) == -1)
+        {
+            std::cout << "Got dynamic batch size. Setting input batch size to "
+                      << batchSize << "." << std::endl;
+            inputShape.at(0) = batchSize;
+        }
+        else
+        {
+            assert(("Input batch size should match the batch size of the input "
+                    "graph sample.",
+                    inputShape.at(0) == batchSize));
+        }
+
+        if (inputShape.at(1) == -1)
+        {
+            std::cout << "Got dynamic node size. Setting node size to "
+                      << numNodes << "." << std::endl;
+            inputShape.at(1) = numNodes;
+        }
+        else
+        {
+            assert(("Input node size should match the node size of the input "
+                    "graph sample.",
+                    inputShape.at(1) == numNodes));
+        }
+
+        inputTypes.push_back(inputType);
+        inputDims.push_back(inputShape);
     }
-    else
+
+    std::vector<std::string> outputNameStrs;
+    std::vector<ONNXTensorElementDataType> outputTypes;
+    std::vector<std::vector<int64_t>> outputDims;
+
+    for (int iOutput = 0; iOutput < numOutputNodes; iOutput++)
     {
-        batchSize = inputDims.at(0);
-    }
+        Ort::AllocatedStringPtr outputNamePtr =
+            session.GetOutputNameAllocated(iOutput, allocator);
+        const char* outputName = outputNamePtr.get();
+        outputNameStrs.push_back(std::string(outputName));
 
-    Ort::AllocatedStringPtr outputNamePtr = session.GetOutputNameAllocated(0, allocator);
-    const char* outputName = outputNamePtr.get();
+        Ort::TypeInfo outputTypeInfo = session.GetOutputTypeInfo(iOutput);
 
-    Ort::TypeInfo outputTypeInfo = session.GetOutputTypeInfo(0);
-    auto outputTensorInfo = outputTypeInfo.GetTensorTypeAndShapeInfo();
+        auto outputTensorInfo = outputTypeInfo.GetTensorTypeAndShapeInfo();
+        auto outputType = outputTensorInfo.GetElementType();
+        auto outputShape = outputTensorInfo.GetShape();
 
-    ONNXTensorElementDataType outputType = outputTensorInfo.GetElementType();
+        if (outputShape.at(0) == -1)
+        {
+            std::cout << "Got dynamic batch size. Setting output batch size to "
+                      << batchSize << "." << std::endl;
+            outputShape.at(0) = batchSize;
+        }
+        else
+        {
+            assert(
+                ("Output batch size should match the batch size of the input "
+                 "graph sample.",
+                 outputShape.at(0) == batchSize));
+        }
 
-    std::vector<int64_t> outputDims = outputTensorInfo.GetShape();
-    if (outputDims.at(0) == -1)
-    {
-        std::cout << "Got dynamic batch size. Setting output batch size to "
-                  << batchSize << "." << std::endl;
-        outputDims.at(0) = batchSize;
+        if (outputShape.at(1) == -1)
+        {
+            std::cout << "Got dynamic node size. Setting node size to "
+                      << numNodes << "." << std::endl;
+            outputShape.at(1) = numNodes;
+        }
+        else
+        {
+            assert(("Output node size should match the node size of the input "
+                    "graph sample.",
+                    outputShape.at(1) == numNodes));
+        }
+
+        outputTypes.push_back(outputType);
+        outputDims.push_back(outputShape);
     }
 
     std::cout << "Number of Input Nodes: " << numInputNodes << std::endl;
     std::cout << "Number of Output Nodes: " << numOutputNodes << std::endl;
-    std::cout << "Input Name: " << inputName << std::endl;
-    std::cout << "Input Type: " << inputType << std::endl;
-    std::cout << "Input Dimensions: " << inputDims << std::endl;
-    std::cout << "Output Name: " << outputName << std::endl;
-    std::cout << "Output Type: " << outputType << std::endl;
-    std::cout << "Output Dimensions: " << outputDims << std::endl;
 
-    cv::Mat imageBGR = cv::imread(imageFilepath, cv::ImreadModes::IMREAD_COLOR);
-    cv::Mat resizedImageBGR, resizedImageRGB, resizedImage, preprocessedImage;
-    cv::resize(imageBGR, resizedImageBGR,
-               cv::Size(inputDims.at(3), inputDims.at(2)),
-               cv::InterpolationFlags::INTER_CUBIC);
-    cv::cvtColor(resizedImageBGR, resizedImageRGB,
-                 cv::ColorConversionCodes::COLOR_BGR2RGB);
-    resizedImageRGB.convertTo(resizedImage, CV_32F, 1.0 / 255);
-
-    cv::Mat channels[3];
-    cv::split(resizedImage, channels);
-    // Normalization per channel
-    // Normalization parameters obtained from
-    // https://github.com/onnx/models/tree/master/vision/classification/squeezenet
-    channels[0] = (channels[0] - 0.485) / 0.229;
-    channels[1] = (channels[1] - 0.456) / 0.224;
-    channels[2] = (channels[2] - 0.406) / 0.225;
-    cv::merge(channels, 3, resizedImage);
-    // HWC to CHW
-    cv::dnn::blobFromImage(resizedImage, preprocessedImage);
-
-    size_t inputTensorSize = vectorProduct(inputDims);
-    std::vector<float> inputTensorValues(inputTensorSize);
-    // Make copies of the same image input.
-    for (int64_t i = 0; i < batchSize; ++i)
+    for (int iInput = 0; iInput < numInputNodes; iInput++)
     {
-        std::copy(preprocessedImage.begin<float>(),
-                  preprocessedImage.end<float>(),
-                  inputTensorValues.begin() + i * inputTensorSize / batchSize);
+        std::cout << "Input Name: " << inputNameStrs[iInput] << std::endl;
+        std::cout << "Input Type: " << inputTypes[iInput] << std::endl;
+        std::cout << "Input Dimensions: " << inputDims[iInput] << std::endl;
     }
 
-    size_t outputTensorSize = vectorProduct(outputDims);
-    assert(("Output tensor size should equal to the label set size.",
-            labels.size() * batchSize == outputTensorSize));
-    std::vector<float> outputTensorValues(outputTensorSize);
+    for (int iOutput = 0; iOutput < numOutputNodes; iOutput++)
+    {
+        std::cout << "Output Name: " << outputNameStrs[iOutput] << std::endl;
+        std::cout << "Output Type: " << outputTypes[iOutput] << std::endl;
+        std::cout << "Output Dimensions: " << outputDims[iOutput] << std::endl;
+    }
 
-    std::vector<const char*> inputNames{inputName};
-    std::vector<const char*> outputNames{outputName};
     std::vector<Ort::Value> inputTensors;
     std::vector<Ort::Value> outputTensors;
+    std::vector<const char*> inputNames{
+        inputNameStrs[0].c_str(), inputNameStrs[1].c_str(),
+        inputNameStrs[2].c_str(), inputNameStrs[3].c_str()};
 
+    std::vector<const char*> outputNames{outputNameStrs[0].c_str(),
+                                         outputNameStrs[1].c_str()};
     Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(
         OrtAllocatorType::OrtArenaAllocator, OrtMemType::OrtMemTypeDefault);
+
     inputTensors.push_back(Ort::Value::CreateTensor<float>(
-        memoryInfo, inputTensorValues.data(), inputTensorSize, inputDims.data(),
-        inputDims.size()));
+        memoryInfo, x.data(), x.size(), inputDims[0].data(),
+        inputDims[0].size()));
+
+    inputTensors.push_back(Ort::Value::CreateTensor<float>(
+        memoryInfo, pos.data(), pos.size(), inputDims[1].data(),
+        inputDims[1].size()));
+
+    inputTensors.push_back(Ort::Value::CreateTensor<bool>(
+        memoryInfo, fea_mask.get(),
+        numNodes * (node_features_array.shape[1] / 2), inputDims[2].data(),
+        inputDims[2].size()));
+
+    inputTensors.push_back(Ort::Value::CreateTensor<bool>(
+        memoryInfo, node_mask.get(), numNodes, inputDims[3].data(),
+        inputDims[3].size()));
+
     outputTensors.push_back(Ort::Value::CreateTensor<float>(
-        memoryInfo, outputTensorValues.data(), outputTensorSize,
-        outputDims.data(), outputDims.size()));
+        memoryInfo, x_c.data(), x_c.size(), outputDims[0].data(),
+        outputDims[0].size()));
+
+    outputTensors.push_back(Ort::Value::CreateTensor<float>(
+        memoryInfo, beta.data(), beta.size(), outputDims[1].data(),
+        outputDims[1].size()));
 
     session.Run(Ort::RunOptions{nullptr}, inputNames.data(),
-                inputTensors.data(), 1 /*Number of inputs*/, outputNames.data(),
-                outputTensors.data(), 1 /*Number of outputs*/);
+                inputTensors.data(), 4, outputNames.data(),
+                outputTensors.data(), 2);
 
-    std::vector<int> predIds(batchSize, 0);
-    std::vector<std::string> predLabels(batchSize);
-    std::vector<float> confidences(batchSize, 0.0f);
-    for (int64_t b = 0; b < batchSize; ++b)
-    {
-        float activation = 0;
-        float maxActivation = std::numeric_limits<float>::lowest();
-        float expSum = 0;
-        for (int i = 0; i < labels.size(); i++)
-        {
-            activation = outputTensorValues.at(i + b * labels.size());
-            expSum += std::exp(activation);
-            if (activation > maxActivation)
-            {
-                predIds.at(b) = i;
-                maxActivation = activation;
-            }
-        }
-        predLabels.at(b) = labels.at(predIds.at(b));
-        confidences.at(b) = std::exp(maxActivation) / expSum;
-    }
-    for (int64_t b = 0; b < batchSize; ++b)
-    {
-        assert(("Output predictions should all be identical.",
-                predIds.at(b) == predIds.at(0)));
-    }
-    // All the predictions should be the same
-    // because the input images are just copies of each other.
-
-    std::cout << "Predicted Label ID: " << predIds.at(0) << std::endl;
-    std::cout << "Predicted Label: " << predLabels.at(0) << std::endl;
-    std::cout << "Uncalibrated Confidence: " << confidences.at(0) << std::endl;
-
-    // Measure latency
-    int numTests{100};
-    std::chrono::steady_clock::time_point begin =
-        std::chrono::steady_clock::now();
-    for (int i = 0; i < numTests; i++)
-    {
-        session.Run(Ort::RunOptions{nullptr}, inputNames.data(),
-                    inputTensors.data(), 1, outputNames.data(),
-                    outputTensors.data(), 1);
-    }
-    std::chrono::steady_clock::time_point end =
-        std::chrono::steady_clock::now();
-    std::cout << "Minimum Inference Latency: "
-              << std::chrono::duration_cast<std::chrono::milliseconds>(end -
-                                                                       begin)
-                         .count() /
-                     static_cast<float>(numTests)
-              << " ms" << std::endl;
+    // Post-processing of output tensors to get object condensation clusters
 }
