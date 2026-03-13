@@ -1,152 +1,8 @@
-
 // https://github.com/microsoft/onnxruntime/blob/v1.8.2/csharp/test/Microsoft.ML.OnnxRuntime.EndToEndTests.Capi/CXX_Api_Sample.cpp
 // https://github.com/microsoft/onnxruntime/blob/v1.8.2/include/onnxruntime/core/session/onnxruntime_cxx_api.h
+#include "oc.hpp"
+#include "utils.hpp"
 #include <onnxruntime_cxx_api.h>
-
-#include "cnpy.h"
-#include <cassert>
-#include <chrono>
-#include <cmath>
-#include <exception>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <numeric>
-#include <string>
-#include <vector>
-
-template <typename T>
-T vectorProduct(const std::vector<T>& v)
-{
-    return accumulate(v.begin(), v.end(), 1, std::multiplies<T>());
-}
-
-/**
- * @brief Operator overloading for printing vectors
- * @tparam T
- * @param os
- * @param v
- * @return std::ostream&
- */
-template <typename T>
-std::ostream& operator<<(std::ostream& os, const std::vector<T>& v)
-{
-    os << "[";
-    for (int i = 0; i < v.size(); ++i)
-    {
-        os << v[i];
-        if (i != v.size() - 1)
-        {
-            os << ", ";
-        }
-    }
-    os << "]";
-    return os;
-}
-
-/**
- * @brief Print ONNX tensor data type
- * https://github.com/microsoft/onnxruntime/blob/rel-1.6.0/include/onnxruntime/core/session/onnxruntime_c_api.h#L93
- * @param os
- * @param type
- * @return std::ostream&
- */
-std::ostream& operator<<(std::ostream& os,
-                         const ONNXTensorElementDataType& type)
-{
-    switch (type)
-    {
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED:
-            os << "undefined";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-            os << "float";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-            os << "uint8_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-            os << "int8_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-            os << "uint16_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-            os << "int16_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-            os << "int32_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-            os << "int64_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:
-            os << "std::string";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-            os << "bool";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-            os << "float16";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-            os << "double";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-            os << "uint32_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-            os << "uint64_t";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX64:
-            os << "float real + float imaginary";
-            break;
-        case ONNXTensorElementDataType::
-            ONNX_TENSOR_ELEMENT_DATA_TYPE_COMPLEX128:
-            os << "double real + float imaginary";
-            break;
-        case ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-            os << "bfloat16";
-            break;
-        default:
-            break;
-    }
-
-    return os;
-}
-
-void unpackFeatures(cnpy::NpyArray x, cnpy::NpyArray& x_out,
-                    cnpy::NpyArray& mask_out)
-{
-    auto shape = x.shape;
-    auto ndims = x.shape.size();
-    assert(static_cast<int>(ndims) == 2);
-
-    auto numNodes = shape[0];
-    auto numFeatures = shape[1];
-    auto numPairs = numFeatures / 2;
-
-    x_out = cnpy::NpyArray({numNodes, numPairs, 2}, sizeof(float), false);
-    mask_out = cnpy::NpyArray({numNodes, numPairs}, sizeof(bool), false);
-
-    for (int iNode = 0; iNode < numNodes; ++iNode)
-    {
-        for (int iPair = 0; iPair < numPairs; ++iPair)
-        {
-            float energy = x.data<float>()[iNode * numFeatures + 2 * iPair];
-            float time = x.data<float>()[iNode * numFeatures + 2 * iPair + 1];
-            x_out.data<float>()[iNode * numPairs * 2 + iPair * 2] = energy;
-            x_out.data<float>()[iNode * numPairs * 2 + iPair * 2 + 1] = time;
-            mask_out.data<bool>()[iNode * numPairs + iPair] =
-                (std::abs(energy) > 0.0f) || (std::abs(time) > 0.0f);
-        }
-    }
-    return;
-}
-
-void oc_inference(const std::vector<float>& x, const std::vector<float>& beta,
-                  std::vector<int>& object_ids, double beta_thres = 0.4,
-                  double dist_thres = 0.8, int bkg_idx = -1);
 
 int main(int argc, char* argv[])
 {
@@ -223,7 +79,6 @@ int main(int argc, char* argv[])
     {
         node_mask[i] = true;
     }
-
     // Output Tensor Values
     std::vector<float> x_c(pos.size());
     std::vector<float> beta(numNodes);
@@ -416,4 +271,27 @@ int main(int argc, char* argv[])
                 outputTensors.data(), 2);
 
     // Post-processing of output tensors to get object condensation clusters
+    std::vector<std::vector<float>> x_oc(outputDims[0][1],
+                                         std::vector<float>(outputDims[0][2]));
+    for (int i = 0; i < outputDims[0][1]; i++)
+    {
+        for (int j = 0; j < outputDims[0][2]; j++)
+        {
+            x_oc[i][j] = x_c[i * outputDims[0][2] + j];
+        }
+    }
+
+    std::vector<int> object_ids; // predicted object ids for each node
+    oc_inference(x_oc, beta, object_ids, 0.5, 0.8, -1);
+
+    // save output object ids to file
+    cnpy::NpyArray object_ids_npy({numNodes}, sizeof(int), false);
+    for (int i = 0; i < numNodes; ++i)
+    {
+        object_ids_npy.data<int>()[i] = object_ids[i];
+    }
+
+    // compute metric
+    auto ri = rand_index(node_targets_array.as_vec<int>(), object_ids);
+    std::cout << "Rand Index: " << ri << std::endl;
 }
